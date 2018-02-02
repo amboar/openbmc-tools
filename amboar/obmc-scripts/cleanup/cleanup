@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -x
+
+# Removing /var/lib/phosphor-inventory-manager/ prevents
+# `Jan 30 07:51:45 witherspoon phosphor-dbus-monitor[1144]: The inventory is not present.`
+# 
+# Removing /usr/local/share/pnor/* cleans host firmware patches
+ssh root@$1 <<EOF
+rm -rf /var/lib/phosphor-inventory-manager/
+rm -rf /usr/local/share/pnor/*
+EOF
