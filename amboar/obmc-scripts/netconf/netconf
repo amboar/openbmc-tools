@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+
+from os import path
+from telnetlib import Telnet
+from types import MethodType
+from xdg import BaseDirectory
+import argparse
+import sys
+import time
+import toml
+
+def expect_or_raise(conn, patterns, timeout=None):
+    i, m, d = conn.expect([bytes(p, 'ascii') for p in patterns], timeout)
+    if i == -1:
+        msg = "Match failed, expected '%s', got '%s'" % (str(patterns), d)
+        print(msg, file=sys.stderr)
+        raise ValueError
+    return i, m, d
+
+def encode_and_write(conn, comm="", sep="\n"):
+    # Slow down the writes to help poor ol' serial-over-telnet
+    for c in comm + sep:
+        conn.write(bytes(c, 'ascii'))
+        time.sleep(0.01)
+
+def init_telnet(host, port=0, timeout=None):
+    conn = Telnet(host, port, timeout)
+    conn.encode_and_write = MethodType(encode_and_write, conn)
+    conn.expect_or_raise = MethodType(expect_or_raise, conn)
+    return conn
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("machine", nargs="?")
+    parser.add_argument("-l", "--list-machines", action="store_true")
+    parser.add_argument("-d", "--device", nargs=1, default="eth0")
+    args = parser.parse_args()
+
+    confbase = BaseDirectory.save_config_path("obmc-scripts")
+    conffile = path.join(confbase, "netconf")
+    if not path.exists(conffile):
+        print("Missing configuration file: %s" % (conffile))
+        sys.exit(1)
+
+    conf = toml.load(conffile)
+    if args.list_machines:
+        print("Machines:", *list(sorted(conf.keys())), sep="\n\t")
+        sys.exit(0)
+
+    if not args.machine:
+        print("Machine name required")
+        sys.exit(1)
+
+    mach = conf[args.machine]
+    console = mach["console"]
+    conn = init_telnet(console["host"], console["port"])
+
+    try:
+        conn.encode_and_write()
+        i, m, d = conn.expect_or_raise([
+            "%s login:" % (mach["platform"]),
+            "root@%s:.*#" % (mach["platform"]),
+            "root@%s:.*#" % (args.machine),
+        ], 5)
+
+        if i == 0:
+            conn.encode_and_write(mach["user"])
+            conn.read_until(b"Password:")
+            conn.encode_and_write(mach["password"])
+            conn.expect_or_raise(["root@%s:.*#" % (mach["platform"])])
+
+        ipv4 = mach[args.device]["ipv4"]
+
+        conn.encode_and_write('busctl call  xyz.openbmc_project.Network /xyz/openbmc_project/network/{} xyz.openbmc_project.Network.IP.Create IP ssys "xyz.openbmc_project.Network.IP.Protocol.IPv4" "{}" {} "{}"'.format(args.device, ipv4["ip"], ipv4["prefix"], ipv4["gateway"]))
+        conn.read_until(b"# ")
+        conn.encode_and_write('busctl set-property xyz.openbmc_project.Network /xyz/openbmc_project/network/config xyz.openbmc_project.Network.SystemConfiguration DefaultGateway s "{}"'.format(ipv4["gateway"]))
+    finally:
+        conn.close()
+
+if __name__ == "__main__":
+    main()
