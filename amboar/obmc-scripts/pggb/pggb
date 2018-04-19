@@ -1,0 +1,143 @@
+#!/usr/bin/python3
+
+import argparse
+import telnetlib
+
+class TelnetConnection(object):
+    def __init__(self, target):
+        addr = target.split(":")
+        self.host = addr[0]
+        self.port = addr[1] if len(addr) > 1 else 23
+        self.session = telnetlib.Telnet()
+
+    def __enter__(self):
+        self.session.open(self.host, self.port)
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.session.close()
+        return type is None
+
+    def send(self, data):
+        self.session.write(bytes(data, 'ascii'))
+
+    def response(self, timeout=None):
+        resp = self.session.read_until(bytes("ast#", 'ascii'), timeout)
+        return None if resp is None else resp.decode('ascii')
+
+    def sync(self, expected=None, timeout=None):
+        if expected is None:
+            expected = [bytes("ast#", 'ascii')]
+        i, _, text = self.session.expect(expected, timeout)
+        if i == -1:
+            raise ValueError(text)
+
+def uboot_mdl(sess, addr):
+    sess.send("md.l 0x{:x} 1\n".format(addr))
+    resp = sess.response()
+    # resp looks like:
+    #
+    # ```
+    # md.l 0x1e78500c 1
+    # 1e78500c: 00000010                               ....
+    # ast#
+    # ```
+    output = [x.strip() for x in resp.split("\n")][1]
+    return int(output.split()[1], 16)
+
+def uboot_mwl(sess, addr, val, sync=None):
+    sess.send("mw.l 0x{:x} 0x{:x} 1\n".format(addr, val))
+    sess.sync(sync)
+
+def uboot_mul(sess, addr, val, mask, sync=None):
+    cur = uboot_mdl(sess, addr)
+    up = (cur & ~mask) | val
+    uboot_mwl(sess, addr, up, sync)
+
+WDT_RLD = 0x4
+WDT_CTL = 0xc
+WDT_CTL_BOOT_CODE = 7
+WDT_STS = 0x10
+WDT_STS_TIMEOUT = 0
+WDT_STS_SOURCE = 1
+
+def bit(x):
+    return (1 << x)
+
+def wdt_addr(wdt):
+    return 0x1e785000 + (wdt * 0x20)
+
+def get_armed_wdts(sess):
+    armed = []
+    for wdt in range(0, 3):
+        ctl = uboot_mdl(sess, wdt_addr(wdt) + WDT_CTL)
+        if (ctl & bit(WDT_CTL_BOOT_CODE)) != 0:
+            armed.append(wdt)
+    return armed
+
+def cmd_armed(sess, args):
+    armed = get_armed_wdts(sess)
+    for wdt in armed:
+        print("WDT{} will cause switch to CE1 on timeout".format(wdt + 1))
+
+def get_tripped_wdts(sess):
+    for wdt in range(0, 3):
+        ctl = uboot_mdl(sess, wdt_addr(wdt) + WDT_CTL)
+        sts = uboot_mdl(sess, wdt_addr(wdt) + WDT_STS)
+        switch = (ctl & bit(WDT_CTL_BOOT_CODE)) != 0
+        timeout = (sts & bit(WDT_STS_SOURCE)) != 0
+        if switch and timeout:
+            return wdt
+    return None
+
+def cmd_chip(sess, args):
+    which = get_tripped_wdts(sess)
+    details = "CE0" if which is None else "CE1 (WDT{})".format(which + 1)
+    print("Current boot chip: {}".format(details))
+
+def cmd_boot(sess, args):
+    assert args.chip in [0, 1]
+
+    # Index WDTs from 1 just like the documentation
+    base = wdt_addr(args.wdt - 1)
+    addr = {
+            'ctl' : base + WDT_CTL,
+            'rld' : base + WDT_RLD,
+            'sts' : base + WDT_STS,
+    }
+    mask = bit(WDT_CTL_BOOT_CODE)
+
+    # Clear the current source state (via separate W1C register)
+    uboot_mwl(sess, addr['sts'] + 4, 1)
+    # Disable the WDT
+    uboot_mul(sess, addr['ctl'], 0, 1)
+    # Configure the chip to boot
+    uboot_mul(sess, addr['ctl'], args.chip * mask, mask)
+    # Set a 10 cycle timeout
+    uboot_mwl(sess, addr['rld'], 10)
+    # Enable the WDT
+    sync = [
+            bytes('Hit any key to stop autoboot', 'ascii'),
+            bytes('ast#', 'ascii'),
+    ]
+    uboot_mul(sess, addr['ctl'], 1, 1, sync=sync)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target")
+    cmds = parser.add_subparsers()
+    armed = cmds.add_parser("armed")
+    armed.set_defaults(func=cmd_armed)
+    which = cmds.add_parser("chip")
+    which.set_defaults(func=cmd_chip)
+    boot = cmds.add_parser("boot")
+    boot.set_defaults(func=cmd_boot)
+    boot.add_argument("wdt", default=2, type=int)
+    boot.add_argument("chip", default=0, type=int)
+    args = parser.parse_args()
+
+    with TelnetConnection(args.target) as sess:
+        args.func(sess, args)
+
+if __name__ == '__main__':
+    main()
