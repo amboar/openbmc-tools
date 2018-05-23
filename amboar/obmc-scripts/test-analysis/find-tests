@@ -1,0 +1,47 @@
+#!/bin/bash
+
+set -eou pipefail
+
+export MAKE_PRINTVARS=$(pwd)/make-printvars
+
+dump_tests() {
+	SUBDIRS=$(make-printvars SUBDIRS | sed 's/^SUBDIRS=//')
+	if [ -z "$SUBDIRS" ]
+	then
+		${MAKE_PRINTVARS} check_PROGRAMS
+	else
+		for SUBDIR in $SUBDIRS
+		do
+			if [ -d $SUBDIR -a "$SUBDIR" != "." ]
+			then
+				pushd $SUBDIR > /dev/null
+				dump_tests
+				popd > /dev/null
+			fi
+		done
+	fi
+}
+
+build_setup() {
+	if [ -e bootstrap.sh ]
+	then
+		./bootstrap.sh && ./configure ${CONFIGUREFLAGS} || true
+#	elif [ -e CMakeLists.txt ]
+#	then
+#		cmake . || true
+	fi
+}
+
+find . -maxdepth 2 -name bootstrap.sh -o -name CMakeLists.txt \
+	| xargs -n1 dirname \
+	| sort \
+	| while read r;
+	  do
+		pushd $r > /dev/null
+		echo $r
+		CONFIGURED=0
+		! [ -f Makefile ] && build_setup
+		[ -f Makefile ] && dump_tests
+		echo
+		popd > /dev/null
+	  done

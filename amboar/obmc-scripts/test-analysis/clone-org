@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+
+import sh
+import requests
+import json
+import sys
+import os
+
+from typing import Dict, List, Union, cast
+
+git = sh.git.bake()
+
+V = Union[Dict[str, str], str]
+E = Dict[str, V]
+R = List[E]
+
+def org_repos_url(name) -> str:
+    return "https://api.github.com/users/{}/repos?per_page=100".format(name)
+
+def org_repos(name: str) -> R:
+    r = requests.get(org_repos_url(name))
+    if not r.ok:
+        raise ValueError("Bad organisation name")
+    return json.loads(r.text or r.content)
+
+for repo in org_repos("openbmc"):
+    url = cast(str, repo['clone_url'])
+    dirname = sh.basename(url, ".git").strip()
+    if os.path.exists(dirname):
+        print("{} already present".format(dirname))
+    else:
+        git.clone(url, _in=sys.stdin, _out=sys.stdout, _err=sys.stderr)

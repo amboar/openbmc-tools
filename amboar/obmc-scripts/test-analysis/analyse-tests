@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+
+import enum
+from typing import Dict, Union, List, cast
+from pprint import pprint
+import sys
+
+class LogState(enum.Enum):
+    INIT = 1
+    AUTOTOOLS = 2
+    TESTS = 3
+
+with open(sys.argv[1]) as infile:
+    packages = list()
+    data: Dict[str, Union[List[str], str]] = dict()
+    state = LogState.INIT
+    for line in infile:
+        if state is LogState.INIT:
+            if line.startswith('./'):
+                data['package'] = line[2:].strip()
+            state = LogState.AUTOTOOLS
+        elif state is LogState.AUTOTOOLS:
+            if not line.strip():
+                data['tests'] = list()
+                state = LogState.INIT
+                packages.append(data)
+                data = dict()
+            elif line.startswith('check_PROGRAMS'):
+                state = LogState.TESTS
+                if 'tests' not in data:
+                    data['tests'] = list()
+                tests = cast(List[str], data['tests'])
+                tests.extend(line[len('check_PROGRAMS='):].split())
+        elif state is LogState.TESTS:
+            if not line.strip():
+                state = LogState.INIT
+                packages.append(data)
+                data = dict()
+            else:
+                tests = cast(List[str], data['tests'])
+                tests.extend(line[len('check_PROGRAMS='):].split())
+    order = lambda v: len(cast(List[str], v['tests']))
+    for package in sorted(packages, key=order, reverse=True):
+        print("{} {} {}".format(len(package['tests']), package['package'], ",".join(package['tests'])))

@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -eou pipefail
+
+filename=""
+if [ -f GNUmakefile ] ; then
+  filename="GNUmakefile"
+elif [ -f makefile ] ; then
+  filename="makefile"
+elif [ -f Makefile ] ; then
+  filename="Makefile"
+fi
+
+printvar=$(dirname $0)/printvars.mak
+
+if [ -n "$filename" ] ; then
+  vars=""
+  for n in $@ ; do
+    vars="$vars print-$n"
+  done
+  make -f $filename -f $printvar $vars
+else
+  echo "No makefile found" 1>&2
+  exit 1
+fi

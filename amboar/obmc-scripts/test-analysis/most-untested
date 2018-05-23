@@ -1,0 +1,20 @@
+#!/bin/bash
+
+set -eou pipefail
+
+if [ $# -lt 2 ]
+then
+    exit 1
+fi
+
+TESTABLE=$1
+TESTED=$2
+
+comm -3 $TESTABLE $TESTED \
+    | while read repo
+      do
+	  pushd $repo > /dev/null
+	  echo $(sloccount . | grep 'Total Physical Source Lines of Code (SLOC)' | cut -d= -f2) $repo
+	  popd > /dev/null
+      done \
+    | sort -rn
