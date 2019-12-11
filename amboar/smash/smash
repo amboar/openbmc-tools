@@ -1,0 +1,72 @@
+#!/bin/sh
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2019 IBM Corp.
+
+# # fdisk -l /dev/mmcblk0
+# Disk /dev/mmcblk0: 10 GB, 10737418240 bytes, 20971520 sectors
+# 327680 cylinders, 4 heads, 16 sectors/track
+# Units: sectors of 1 * 512 = 512 bytes
+
+SRC_IMG=${SRC_IMG:-rootfs.squashfs}
+DST_IMG=$(mktemp)
+MMC_IMG=${MMC_IMG:-image.bin}
+
+SECTOR_SIZE=512
+BLOCK_SIZE=4096
+CSD_SIZE=$((1 << (9 + 9 - 1 + 2)))
+
+cleanup() {
+	rm -f $DST_IMG
+}
+
+trap cleanup EXIT
+
+align_up() {
+	local offset=$1
+	local size=$2
+
+	echo $(((($offset + ($size - 1)) / $size) * $size))
+}
+
+verity_get_meta() {
+	local needle="$1"
+	local haystack="$2"
+
+	echo "$haystack" | grep "$needle" | cut -d: -f2 | tr -d '[ \t]'
+}
+
+rm -f $MMC_IMG
+
+dd if="$SRC_IMG" of="$DST_IMG" 2> /dev/null
+
+VERITY_HASH_OFFSET=$(align_up $(stat --format=%s $SRC_IMG) $SECTOR_SIZE)
+VERITY_HASH_BLOCKS=$(($VERITY_HASH_OFFSET / $BLOCK_SIZE))
+
+VERITY_ALGO=sha256
+VERITY_META="$(veritysetup format \
+	--hash $VERITY_ALGO \
+	--data-block-size $BLOCK_SIZE \
+	--hash-block-size $BLOCK_SIZE \
+	--hash-offset $VERITY_HASH_OFFSET \
+	"$DST_IMG" "$DST_IMG")"
+
+VERITY_SALT=$(verity_get_meta Salt "$VERITY_META")
+VERITY_ROOT=$(verity_get_meta Root "$VERITY_META")
+
+A_SECTORS=$(($(align_up $(stat --format=%s $DST_IMG) $BLOCK_SIZE) / $SECTOR_SIZE))
+A_LINEAR="a,,,rw, 0 $A_SECTORS linear /dev/mmcblk0 0"
+ROOT_SECTORS=$(($(align_up $(stat --format=%s $SRC_IMG) $BLOCK_SIZE) / $SECTOR_SIZE))
+ROOT_VERITY="root,,,ro, 0 $ROOT_SECTORS verity 1 /dev/dm-0 /dev/dm-0 $BLOCK_SIZE $BLOCK_SIZE $VERITY_HASH_BLOCKS $(($VERITY_HASH_BLOCKS + 1)) $VERITY_ALGO $VERITY_ROOT $VERITY_SALT"
+
+# Make an appropriately sized image for MMC
+fallocate -l $(align_up $(stat --format=%s $DST_IMG) $CSD_SIZE) $MMC_IMG
+dd if="$DST_IMG" of=$MMC_IMG conv=notrunc 2> /dev/null
+
+echo export SMASH_DM_MOD_CREATE=\'dm-mod.create=\"$A_LINEAR\; $ROOT_VERITY\"\'
+echo export SMASH_MMC_IMG=$MMC_IMG
+echo
+
+>&2 echo Example QEMU commandline:
+>&2 echo
+>&2 echo qemu-system-arm -M ast2600-evb -m 1024 -kernel zImage -dtb aspeed-ast2600-evb.dtb -nographic -drive file=sd1.img,if=sd,format=raw -drive file=sd2.img,if=sd,format=raw -drive file=\${SMASH_MMC_IMG},if=sd,format=raw -append "console=ttyS4,1152008n earlyprintk debug \$SMASH_DM_MOD_CREATE root=/dev/dm-1"
